@@ -10,25 +10,21 @@ import (
 	"github.com/topolvm/topolvm/pkg/lvmd/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	coordinationv1 "k8s.io/api/coordination/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	crlog "sigs.k8s.io/controller-runtime/pkg/log"
-	"time"
 )
 
 // LogicalVolumeReconciler reconciles a LogicalVolume object
 type LogicalVolumeReconciler struct {
 	client    client.Client
-	namespace string
 	nodeName  string
+	lock      LeaseLock
 	vgService proto.VGServiceClient
 	lvService proto.LVServiceClient
 }
@@ -39,8 +35,8 @@ type LogicalVolumeReconciler struct {
 func NewLogicalVolumeReconcilerWithServices(client client.Client, namespace string, nodeName string, vgService proto.VGServiceClient, lvService proto.LVServiceClient) *LogicalVolumeReconciler {
 	return &LogicalVolumeReconciler{
 		client:    client,
-		namespace: namespace,
 		nodeName:  nodeName,
+		lock:      *NewLeaseLock(LvmLockName, namespace, client, nodeName),
 		vgService: vgService,
 		lvService: lvService,
 	}
@@ -49,13 +45,11 @@ func NewLogicalVolumeReconcilerWithServices(client client.Client, namespace stri
 // Reconcile creates/deletes LVM logical volume for a LogicalVolume.
 func (r *LogicalVolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := crlog.FromContext(ctx)
-	var lockAcquired bool
 
+	var lockIsAcquired bool
 	defer func() {
-		if lockAcquired {
-			if err := r.releaseLVLock(ctx); err != nil {
-				log.Error(err, "failed to release LV lock after reconciling")
-			}
+		if lockIsAcquired {
+			r.lock.ReleaseLeaseLock(ctx)
 		}
 	}()
 
@@ -124,8 +118,8 @@ func (r *LogicalVolumeReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{Requeue: true}, nil
 		}
 
-		// TODO: Lock is only needed for shared storage.
-		if lockAcquired = r.acquireLVLock(ctx); !lockAcquired {
+		// TODO: LeaseLock is only needed for shared storage.
+		if lockIsAcquired = r.lock.AcquireLeaseLock(ctx); !lockIsAcquired {
 			return ctrl.Result{Requeue: true}, nil
 		}
 
@@ -151,7 +145,7 @@ func (r *LogicalVolumeReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	log.Info("start finalizing LogicalVolume", "name", lv.Name)
-	if lockAcquired = r.acquireLVLock(ctx); !lockAcquired {
+	if lockIsAcquired = r.lock.AcquireLeaseLock(ctx); !lockIsAcquired {
 		log.Error(nil, "Failed to acquire LV lock for deletion")
 		return ctrl.Result{Requeue: true}, nil
 	}
@@ -370,27 +364,6 @@ func (r *LogicalVolumeReconciler) expandLV(ctx context.Context, log logr.Logger,
 	return nil
 }
 
-func (r *LogicalVolumeReconciler) acquireLVLock(ctx context.Context) bool {
-	log := crlog.FromContext(ctx)
-
-	if lockAcquired, err := acquireLeaseLock(ctx, r.client, r.namespace, LvmLockName, r.nodeName); err != nil {
-		log.Error(err, "Failed to acquire lock for LV operation")
-		return false
-	} else if !lockAcquired {
-		log.Info("Lock already acquired")
-		return false
-	}
-	return true
-}
-
-func (r *LogicalVolumeReconciler) releaseLVLock(ctx context.Context) error {
-	if err := releaseLeaseLock(ctx, r.client, r.namespace, LvmLockName, r.nodeName); err != nil {
-		fmt.Println("!!! Failed to release lock error:", err)
-		return err
-	}
-	return nil
-}
-
 type logicalVolumeFilter struct {
 	nodeName string
 }
@@ -448,65 +421,4 @@ func containsKeyAndValue(labels map[string]string, key, value string) bool {
 		}
 	}
 	return false
-}
-
-func acquireLeaseLock(ctx context.Context, k8sClient client.Client, namespace, lockName, holderID string) (bool, error) {
-	log := crlog.FromContext(ctx)
-
-	log.Info("Trying to acquire lease lock '%s/%s' with holder ID '%s'.", namespace, lockName, holderID)
-	newLease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      lockName,
-			Namespace: namespace,
-		},
-		Spec: coordinationv1.LeaseSpec{
-			HolderIdentity:       &holderID,
-			LeaseDurationSeconds: func() *int32 { i := int32(20); return &i }(),
-			AcquireTime:          &metav1.MicroTime{Time: time.Now()},
-			RenewTime:            &metav1.MicroTime{Time: time.Now()},
-		},
-	}
-
-	// Attempt to create the lease directly.
-	err := k8sClient.Create(ctx, newLease)
-	if err == nil {
-		log.Info("Successfully created lease. Lock acquired by '%s'.", holderID)
-		return true, nil
-	}
-
-	if apierrors.IsAlreadyExists(err) {
-		log.Info("Lease already exists. Could not acquire lock.")
-		return false, nil
-	}
-	log.Error(err, "Failed to create lease")
-
-	return false, err
-}
-
-func releaseLeaseLock(ctx context.Context, k8sClient client.Client, namespace, lockName, holderID string) error {
-	log := crlog.FromContext(ctx)
-
-	lease := &coordinationv1.Lease{}
-	err := k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: lockName}, lease)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			log.Info("Lease '%s/%s' not found. Lock is already released.", namespace, lockName)
-			return nil
-		}
-		return err
-	}
-
-	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != holderID {
-		return fmt.Errorf("cannot release lease, holder is '%s', but we are '%s'", *lease.Spec.HolderIdentity, holderID)
-	}
-
-	if err := k8sClient.Delete(ctx, lease); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-
-	log.Info("Successfully released lease '%s/%s' held by '%s'.", namespace, lockName, holderID)
-	return nil
 }
