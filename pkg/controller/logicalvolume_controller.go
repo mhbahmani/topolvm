@@ -11,10 +11,11 @@ import (
 func SetupLogicalVolumeReconcilerWithServices(
 	mgr ctrl.Manager,
 	client client.Client,
+	namespace string,
 	nodeName string,
 	vgService proto.VGServiceClient,
 	lvService proto.LVServiceClient,
 ) error {
-	reconciler := internalController.NewLogicalVolumeReconcilerWithServices(client, nodeName, vgService, lvService)
+	reconciler := internalController.NewLogicalVolumeReconcilerWithServices(client, namespace, nodeName, vgService, lvService)
 	return reconciler.SetupWithManager(mgr)
 }

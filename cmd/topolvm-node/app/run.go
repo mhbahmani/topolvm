@@ -60,6 +60,11 @@ func subMain(ctx context.Context) error {
 		return errors.New("node name is not given")
 	}
 
+	// TODO: Handle getting namespace in a better way.
+	namespace := viper.GetString("namespace")
+	if len(namespace) == 0 {
+		namespace = "topolvm-system"
+	}
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&config.zapOpts)))
 
 	metricsServerOptions := metricsserver.Options{
@@ -120,7 +125,7 @@ func subMain(ctx context.Context) error {
 	lvmd.SetLVMPath(config.lvmPath)
 
 	if err := controller.SetupLogicalVolumeReconcilerWithServices(
-		mgr, client, nodename, vgService, lvService); err != nil {
+		mgr, client, namespace, nodename, vgService, lvService); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "LogicalVolume")
 		return err
 	}
