@@ -30,6 +30,7 @@ var (
 // ControllerServerSettings hold all settings that should be passed to the controller server.
 type ControllerServerSettings struct {
 	MinimumAllocationSettings `json:"allocation" ,yaml:"allocation"`
+	SharedStorageMode         bool `json:"sharedStorage" yaml:"sharedStorage"`
 }
 
 // NewControllerServer returns a new ControllerServer.
@@ -127,6 +128,7 @@ func isRequirementsContaining(requirements *csi.TopologyRequirement, node string
 }
 
 func findNodeHavingTopologyNodeKey(requirements *csi.TopologyRequirement) string {
+	// kube-scheduler decision is reflected in requirements.Preferred
 	for _, topo := range append(requirements.Preferred, requirements.Requisite...) {
 		if v, ok := topo.GetSegments()[topolvm.GetTopologyNodeKey()]; ok {
 			return v
@@ -245,7 +247,7 @@ func (s controllerServerNoLocked) CreateVolume(ctx context.Context, req *csi.Cre
 			return nil, status.Errorf(codes.InvalidArgument, "cannot find source volume's node '%s' in accessibility_requirements", node)
 		}
 	} else {
-		if requirements == nil {
+		if requirements == nil && !s.settings.SharedStorageMode {
 			// In CSI spec, controllers are required that they response OK even if accessibility_requirements field is nil.
 			// So we must create volume, and must not return error response in this case.
 			// - https://github.com/container-storage-interface/spec/blob/release-1.1/spec.md#createvolume
@@ -286,16 +288,25 @@ func (s controllerServerNoLocked) CreateVolume(ctx context.Context, req *csi.Cre
 		return nil, err
 	}
 
+	accessibleTopology := []*csi.Topology{
+		{
+			Segments: map[string]string{"topology.divar.ir/csi": "san"},
+		},
+	}
+	if !s.settings.SharedStorageMode {
+		accessibleTopology = []*csi.Topology{
+			{
+				Segments: map[string]string{topolvm.GetTopologyNodeKey(): node},
+			},
+		}
+	}
+
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
-			CapacityBytes: volume.Status.CurrentSize.Value(),
-			VolumeId:      volume.Status.VolumeID,
-			ContentSource: source,
-			AccessibleTopology: []*csi.Topology{
-				{
-					Segments: map[string]string{topolvm.GetTopologyNodeKey(): node},
-				},
-			},
+			CapacityBytes:      volume.Status.CurrentSize.Value(),
+			VolumeId:           volume.Status.VolumeID,
+			ContentSource:      source,
+			AccessibleTopology: accessibleTopology,
 		},
 	}, nil
 }
