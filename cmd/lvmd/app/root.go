@@ -132,7 +132,8 @@ func subMain(parentCtx context.Context) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				for _, vg := range vgs {
+				for _, dc := range config.DeviceClasses {
+					vg, _ := command.SearchVolumeGroupList(vgs, dc.VolumeGroup)
 					_ = vg.RefreshVGLogicalVolumes(ctx)
 				}
 			}
