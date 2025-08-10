@@ -123,6 +123,22 @@ func subMain(parentCtx context.Context) error {
 	ctx, stop := signal.NotifyContext(parentCtx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Run a goroutine to periodically refresh the logical volumes in each volume group.
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				for _, vg := range vgs {
+					_ = vg.RefreshVGLogicalVolumes(ctx)
+				}
+			}
+		}
+	}()
+
 	wg, pprofServer, metricsServer := startMetricsAndProfilingServers(logger)
 
 	go func() {
