@@ -91,6 +91,7 @@ func init() {
 	fs.DurationVar(&config.leaderElectionRetryPeriod, "leader-election-retry-period", 2*time.Second, "Duration the LeaderElector clients should wait between tries of actions.")
 	fs.BoolVar(&config.skipNodeFinalize, "skip-node-finalize", false, "skips automatic cleanup of PhysicalVolumeClaims when a Node is deleted")
 	fs.StringVar(&config.profilingBindAddress, "profiling-bind-address", "", "Bind pprof profiling to the given network address. If empty, profiling is disabled.")
+	fs.BoolVar(&config.controllerServerSettings.SharedStorageMode, "shared-storage-mode", false, "Enable shared storage mode. When true, volumes are accessible from multiple nodes.")
 
 	driver.QuantityVar(fs, &config.controllerServerSettings.MinimumAllocationSettings.Block,
 		"minimum-allocation-block",
