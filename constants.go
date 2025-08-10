@@ -25,6 +25,13 @@ func GetPluginName() string {
 	}
 }
 
+func GetNamespace() string {
+	if ns := os.Getenv("NAMESPACE"); ns != "" {
+		return ns
+	}
+	return "topolvm-system"
+}
+
 // GetCapacityKeyPrefix returns the key prefix of Node annotation that represents VG free space.
 func GetCapacityKeyPrefix() string {
 	return fmt.Sprintf("capacity.%s/", GetPluginName())
