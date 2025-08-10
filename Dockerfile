@@ -20,6 +20,8 @@ RUN apt-get update \
         btrfs-progs \
         file \
         xfsprogs \
+        dmsetup \
+        parted \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build-topolvm /workdir/build/hypertopolvm /hypertopolvm
