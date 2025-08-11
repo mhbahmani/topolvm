@@ -755,7 +755,7 @@ func (l *LogicalVolume) Resize(ctx context.Context, newSize uint64) error {
 
 // RemoveVolume removes the given volume from the volume group.
 func (vg *VolumeGroup) RemoveVolume(ctx context.Context, name string) error {
-	err := callLVM(ctx, "lvremove", "remove", fullName(name, vg), "-y")
+	err := callLVM(ctx, "lvremove", fullName(name, vg), "-y")
 
 	if IsLVMNotFound(err) {
 		return errors.Join(ErrNotFound, err)
