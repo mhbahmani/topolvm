@@ -32,7 +32,7 @@ const (
 var nodeLogger = ctrl.Log.WithName("driver").WithName("node")
 
 // NewNodeServer returns a new NodeServer.
-func NewNodeServer(nodeName string, vgServiceClient proto.VGServiceClient, lvServiceClient proto.LVServiceClient, mgr manager.Manager) (csi.NodeServer, error) {
+func NewNodeServer(nodeName string, vgServiceClient proto.VGServiceClient, lvServiceClient proto.LVServiceClient, mgr manager.Manager, sharedStorageMode bool) (csi.NodeServer, error) {
 	lvService, err := k8s.NewLogicalVolumeService(mgr)
 	if err != nil {
 		return nil, err
@@ -48,6 +48,7 @@ func NewNodeServer(nodeName string, vgServiceClient proto.VGServiceClient, lvSer
 				Interface: mountutil.New(""),
 				Exec:      utilexec.New(),
 			},
+			SharedStorageMode: sharedStorageMode,
 		},
 	}, nil
 }
