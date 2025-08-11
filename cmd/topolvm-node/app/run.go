@@ -61,10 +61,7 @@ func subMain(ctx context.Context) error {
 	}
 
 	// TODO: Handle getting namespace in a better way.
-	namespace := viper.GetString("namespace")
-	if len(namespace) == 0 {
-		namespace = "topolvm-system"
-	}
+	namespace := topolvm.GetNamespace()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&config.zapOpts)))
 
 	metricsServerOptions := metricsserver.Options{

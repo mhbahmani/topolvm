@@ -1,13 +1,16 @@
 package command
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"github.com/topolvm/topolvm"
 	"math"
 	"path"
-
-	"github.com/topolvm/topolvm"
+	"strings"
+	"time"
 )
 
 // ErrNotFound is returned when a VG or LV is not found.
@@ -143,8 +146,14 @@ func (vg *VolumeGroup) ListVolumes(ctx context.Context) (map[string]*LogicalVolu
 // listVolumes is the internal implementation for retrieving logical volumes and converting them to LogicalVolume instances.
 // It is the backing implementation for both ListVolumes and FindVolume, since the lvs command can be used for both.
 func (vg *VolumeGroup) listVolumes(ctx context.Context, name string) (map[string]*LogicalVolume, error) {
+	// TODO: Only on shared storage mode
+	if err := vg.RefreshVGLogicalVolumes(ctx); err != nil {
+		fmt.Println("!!!! WARNING !!!!: failed to rescan volume group before listing volumes:", err, "this may lead to inconsistent state")
+	}
+
 	ret := map[string]*LogicalVolume{}
 
+	// CreateVolume create
 	var lvs map[string]lv
 	// use fast path if we have the lvs already through the report
 	if vg.reportLvs != nil {
@@ -205,6 +214,11 @@ func (vg *VolumeGroup) convertLV(lv lv) *LogicalVolume {
 func (vg *VolumeGroup) CreateVolume(ctx context.Context, name string, size uint64, tags []string, stripe uint, stripeSize string,
 	lvcreateOptions []string) error {
 
+	// TODO: Only on shared storage mode
+	if err := vg.Rescan(ctx); err != nil {
+		fmt.Println("!!!! WARNING !!!!: failed to rescan volume group before creating volume:", err, "this may lead to inconsistent state")
+	}
+
 	if size%uint64(topolvm.MinimumSectorSize) != 0 {
 		return ErrNoMultipleOfSectorSize
 	}
@@ -225,6 +239,146 @@ func (vg *VolumeGroup) CreateVolume(ctx context.Context, name string, size uint6
 	lvcreateArgs = append(lvcreateArgs, vg.Name())
 
 	return callLVM(ctx, lvcreateArgs...)
+}
+
+func (vg *VolumeGroup) RefreshVGLogicalVolumes(ctx context.Context) error {
+	// Rescan the volume group to ensure that it is up-to-date before refreshing logical volumes.
+	// The main goal is to update device mappers on the node
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	operations := []struct {
+		name string
+		fn   func() error
+	}{
+		{"Rescan", func() error { return vg.Rescan(ctxWithTimeout) }},
+		{"Refresh", func() error { return vg.refreshLogicalVolumes(ctxWithTimeout) }},
+		{"Update", func() error { return vg.Update(ctxWithTimeout) }},
+		{"GetLVReport", func() error {
+			lvs, err := getLVs(ctxWithTimeout, vg, "")
+			if err != nil && !errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("failed to refresh logical volumes for VG '%s': %w", vg.Name(), err)
+			}
+			vg.reportLvs = lvs
+			return nil
+		}},
+		{"CleanupStaleDeviceMappers", func() error { return vg.cleanupStaleDeviceMappers(ctxWithTimeout) }},
+	}
+
+	for _, op := range operations {
+		if ctxWithTimeout.Err() != nil {
+			return fmt.Errorf("context cancelled while executing %s for VG '%s': %w", op.name, vg.Name(), ctxWithTimeout.Err())
+		}
+		if err := op.fn(); err != nil {
+			return fmt.Errorf("%s failed for VG '%s': %w", op.name, vg.Name(), err)
+		}
+	}
+	return nil
+}
+
+func (vg *VolumeGroup) refreshLogicalVolumes(ctx context.Context) error {
+	return callLVM(ctx, "lvchange", "--refresh", vg.Name())
+}
+
+func (vg *VolumeGroup) cleanupStaleDeviceMappers(ctx context.Context) error {
+	reader, err := RunCommand(ctx, "dmsetup", "ls")
+	if err != nil {
+		return fmt.Errorf("failed to run dmsetup ls: %w", err)
+	}
+	defer reader.Close()
+
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		if !strings.HasPrefix(line, vg.Name()) {
+			continue
+		}
+
+		// Extract device name (first field)
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		deviceName := fields[0]
+
+		if err := callLVM(ctx, "lvs", fmt.Sprintf("/dev/mapper/%s", deviceName)); err != nil {
+			removeReader, removeErr := RunCommand(ctx, "dmsetup", "remove", deviceName)
+			if removeErr != nil {
+				fmt.Printf("Warning: failed to remove device mapper %s: %v\n", deviceName, removeErr)
+			} else {
+				removeReader.Close()
+				fmt.Printf("Removed stale device mapper: %s\n", deviceName)
+			}
+		}
+	}
+
+	return scanner.Err()
+}
+
+func (vg *VolumeGroup) Rescan(ctx context.Context) error {
+	return vg.rescanInternal(ctx)
+}
+
+func (vg *VolumeGroup) rescanInternal(ctx context.Context) error {
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	operations := []struct {
+		name string
+		fn   func() error
+	}{
+		{"pvscan", func() error { return callLVM(ctxWithTimeout, "pvscan", "--cache") }},
+		{"partprobe", func() error { return vg.rescanPartitions(ctxWithTimeout) }},
+		{"vgscan", func() error { return callLVM(ctxWithTimeout, "vgscan") }},
+		{"activate", func() error { return callLVM(ctxWithTimeout, "vgchange", "-a", "y", vg.Name()) }},
+	}
+
+	for _, op := range operations {
+		if err := op.fn(); err != nil {
+			return fmt.Errorf("%s failed for VG '%s': %w", op.name, vg.Name(), err)
+		}
+	}
+
+	return nil
+}
+
+func (vg *VolumeGroup) rescanPartitions(ctx context.Context) error {
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	physicalDevices, err := vg.getVGPhysicalDevices(ctxWithTimeout)
+	if err != nil {
+		return err
+	}
+
+	// Use goroutines for parallel partition rescanning (with proper error handling)
+	type result struct {
+		device string
+		err    error
+	}
+
+	results := make(chan result, len(physicalDevices))
+	for _, device := range physicalDevices {
+		go func(dev string) {
+			_, err := RunCommand(ctxWithTimeout, "partprobe", dev)
+			results <- result{device: dev, err: err}
+		}(device)
+	}
+
+	var errs []error
+	for i := 0; i < len(physicalDevices); i++ {
+		res := <-results
+		if res.err != nil {
+			errs = append(errs, fmt.Errorf("device %s: %w", res.device, res.err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("partprobe failed for devices: %v", errs)
+	}
+
+	return nil
 }
 
 // FindPool finds a named thin pool in this volume group.
@@ -272,6 +426,33 @@ func (vg *VolumeGroup) CreatePool(ctx context.Context, name string, size uint64)
 		return nil, err
 	}
 	return vg.FindPool(ctx, name)
+}
+
+func (vg *VolumeGroup) getVGPhysicalDevices(ctx context.Context) ([]string, error) {
+	output, err := callLVMStreamed(ctx, verbosityLVMStateNoUpdate, "vgs", "--noheadings", "-o", "pv_name", "--select", "vg_name="+vg.Name())
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute vgs command for VG '%s': %w", vg.Name(), err)
+	}
+	defer output.Close()
+
+	buf := new(bytes.Buffer)
+	if _, err := buf.ReadFrom(output); err != nil {
+		return nil, fmt.Errorf("failed to read output for VG '%s': %w", vg.Name(), err)
+	}
+
+	physicalDevicesOutput := strings.TrimSpace(buf.String())
+	if physicalDevicesOutput == "" {
+		return []string{}, nil
+	}
+
+	physicalDevices := strings.Split(physicalDevicesOutput, "\n")
+
+	// Trim whitespace from each device path
+	for i, device := range physicalDevices {
+		physicalDevices[i] = strings.TrimSpace(device)
+	}
+
+	return physicalDevices, nil
 }
 
 // ThinPool represents a lvm thin pool.
@@ -574,7 +755,7 @@ func (l *LogicalVolume) Resize(ctx context.Context, newSize uint64) error {
 
 // RemoveVolume removes the given volume from the volume group.
 func (vg *VolumeGroup) RemoveVolume(ctx context.Context, name string) error {
-	err := callLVM(ctx, "lvremove", "-f", fullName(name, vg))
+	err := callLVM(ctx, "lvremove", "remove", fullName(name, vg), "-y")
 
 	if IsLVMNotFound(err) {
 		return errors.Join(ErrNotFound, err)
