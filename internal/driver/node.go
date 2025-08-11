@@ -107,11 +107,12 @@ func (s *nodeServer) NodeGetInfo(ctx context.Context, req *csi.NodeGetInfoReques
 type nodeServerNoLocked struct {
 	csi.UnimplementedNodeServer
 
-	nodeName     string
-	client       proto.VGServiceClient
-	lvService    proto.LVServiceClient
-	k8sLVService *k8s.LogicalVolumeService
-	mounter      mountutil.SafeFormatAndMount
+	nodeName          string
+	client            proto.VGServiceClient
+	lvService         proto.LVServiceClient
+	k8sLVService      *k8s.LogicalVolumeService
+	mounter           mountutil.SafeFormatAndMount
+	SharedStorageMode bool
 }
 
 func (s *nodeServerNoLocked) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
@@ -544,12 +545,16 @@ func (s *nodeServerNoLocked) NodeGetCapabilities(context.Context, *csi.NodeGetCa
 }
 
 func (s *nodeServerNoLocked) NodeGetInfo(ctx context.Context, req *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
+	segments := map[string]string{
+		topolvm.GetTopologyNodeKey(): s.nodeName,
+	}
+	if s.SharedStorageMode {
+		segments[topolvm.GetTopologyGroupKey()] = topolvm.GetSharedStorageCSIClassName()
+	}
 	return &csi.NodeGetInfoResponse{
 		NodeId: s.nodeName,
 		AccessibleTopology: &csi.Topology{
-			Segments: map[string]string{
-				topolvm.GetTopologyNodeKey(): s.nodeName,
-			},
+			Segments: segments,
 		},
 	}, nil
 }
