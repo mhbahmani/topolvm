@@ -25,6 +25,10 @@ func GetPluginName() string {
 	}
 }
 
+func GetSharedStorageCSIClassName() string {
+	return SharedStorageCSIClass
+}
+
 func GetNamespace() string {
 	if ns := os.Getenv("NAMESPACE"); ns != "" {
 		return ns
@@ -45,6 +49,11 @@ func GetCapacityResource() corev1.ResourceName {
 // TopologyNodeKey returns the key of topology that represents node name.
 func GetTopologyNodeKey() string {
 	return fmt.Sprintf("topology.%s/node", GetPluginName())
+}
+
+// TopologyNodeKey returns the key of topology that represents csi type.
+func GetTopologyGroupKey() string {
+	return fmt.Sprintf("topology.%s/csi", GetPluginName())
 }
 
 // GetDeviceClassKey returns the key used in CSI volume create requests to specify a device-class.
@@ -120,3 +129,5 @@ const CreatedbyLabelValue = "topolvm-controller"
 
 // LegacyDeviceDirectory is a directory where TopoLVM Node service creates device files.
 const LegacyDeviceDirectory = "/dev/topolvm"
+
+const SharedStorageCSIClass = "san"
