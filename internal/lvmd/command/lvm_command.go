@@ -79,6 +79,13 @@ func callLVMStreamed(ctx context.Context, logVerbosity int, args ...string) (io.
 	return runCommand(ctx, logVerbosity, cmd)
 }
 
+func RunCommand(ctx context.Context, args ...string) (io.ReadCloser, error) {
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Env = os.Environ()
+	cmd.Env = append(cmd.Env, "LC_ALL=C")
+	return runCommand(ctx, verbosityLVMStateUpdate, cmd)
+}
+
 // runCommand runs the command and returns the stdout as a ReadCloser that also Waits for the command to finish.
 // After the Close command is called the cmd is closed and the resources are released.
 // Not calling close on this method will result in a resource leak.
