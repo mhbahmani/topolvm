@@ -124,21 +124,23 @@ func subMain(parentCtx context.Context) error {
 	defer stop()
 
 	// Run a goroutine to periodically refresh the logical volumes in each volume group.
-	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				for _, dc := range config.DeviceClasses {
-					vg, _ := command.SearchVolumeGroupList(vgs, dc.VolumeGroup)
-					_ = vg.RefreshVGLogicalVolumes(ctx)
+	if config.SharedStorageMode {
+		go func() {
+			ticker := time.NewTicker(1 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					for _, dc := range config.DeviceClasses {
+						vg, _ := command.SearchVolumeGroupList(vgs, dc.VolumeGroup)
+						_ = vg.RefreshVGLogicalVolumes(ctx)
+					}
 				}
 			}
-		}
-	}()
+		}()
+	}
 
 	wg, pprofServer, metricsServer := startMetricsAndProfilingServers(logger)
 

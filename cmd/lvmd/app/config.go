@@ -21,6 +21,8 @@ type Config struct {
 	// LVMCommandPrefix is a list of strings necessary to run a LVM command.
 	// For example, if it's X, `/sbin/lvm lvcreate ...` will be run as `X /sbin/lvm lvcreate ...`.
 	LVMCommandPrefix []string `json:"lvm-command-prefix"`
+	// SharedStorageMode enables shared storage mode. It's optional.
+	SharedStorageMode bool `json:"shared-storage-mode"`
 }
 
 var config = &Config{
